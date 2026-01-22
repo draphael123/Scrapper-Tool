@@ -7,6 +7,7 @@ import { HelpModal } from '@/components/HelpModal';
 import { Tooltip } from '@/components/Tooltip';
 import ProgressIndicator from '@/components/ProgressIndicator';
 import { AnalysisOptions, DEFAULT_OPTIONS } from '@/lib/types';
+import { exportToJSON, exportToExcel, exportToMarkdown, downloadFile } from '@/lib/exportUtils';
 
 // Extend input element to include non-standard directory upload attributes
 declare module 'react' {
@@ -497,6 +498,14 @@ export default function Home() {
     setCurrentFile(file);
     setSearchQuery('');
 
+    // Check file size (limit to 10MB for individual files)
+    const maxSize = 10 * 1024 * 1024; // 10MB
+    if (file.size > maxSize) {
+      setError(`File is too large (${(file.size / 1024 / 1024).toFixed(2)} MB). Maximum size is 10 MB.`);
+      setIsLoading(false);
+      return;
+    }
+
     try {
       const formData = new FormData();
       formData.append('file', file);
@@ -512,7 +521,33 @@ export default function Home() {
         body: formData,
       });
 
-      const data = await response.json();
+      // Check if response is JSON
+      const contentType = response.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        const text = await response.text();
+        throw new Error(
+          text.includes('Request Entity Too Large') || text.includes('413')
+            ? `File "${file.name}" is too large. Maximum size is approximately 10MB.`
+            : text.includes('Request')
+            ? `Server error: ${text.substring(0, 200)}`
+            : 'Server returned an invalid response. Please try again.'
+        );
+      }
+
+      let data;
+      try {
+        data = await response.json();
+      } catch (jsonError) {
+        // If JSON parsing fails, the response might be HTML or plain text
+        const text = await response.text();
+        throw new Error(
+          text.includes('Request Entity Too Large') || text.includes('413')
+            ? `File "${file.name}" is too large. Maximum size is approximately 10MB.`
+            : text.includes('Request')
+            ? `Server error: ${text.substring(0, 200)}`
+            : 'Server returned an invalid response. Please try again.'
+        );
+      }
 
       if (!response.ok) {
         throw new Error(data.error || 'Failed to analyze document');
@@ -602,6 +637,19 @@ export default function Home() {
               withAI ? 'Using GPT-4o-mini for intelligent extraction' : 'Using regex pattern matching',
             ],
           } : null);
+
+          // Check if response is JSON
+          const contentType = response.headers.get('content-type');
+          if (!contentType || !contentType.includes('application/json')) {
+            const text = await response.text();
+            throw new Error(
+              text.includes('Request Entity Too Large') || text.includes('413')
+                ? `File "${file.name}" is too large. Maximum size is approximately 4.5MB.`
+                : text.includes('Request')
+                ? `Server error: ${text.substring(0, 200)}`
+                : 'Server returned an invalid response. Please try again.'
+            );
+          }
 
           const data = await response.json();
           
@@ -735,7 +783,30 @@ export default function Home() {
           body: formData,
         });
 
-        const data = await response.json();
+        // Check if response is JSON
+        const contentType = response.headers.get('content-type');
+        if (!contentType || !contentType.includes('application/json')) {
+          const text = await response.text();
+          throw new Error(
+            text.includes('Request Entity Too Large') || text.includes('413')
+              ? 'Files are too large. Total size limit is approximately 10MB. Please upload fewer or smaller files.'
+              : text.includes('Request')
+              ? `Server error: ${text.substring(0, 200)}`
+              : 'Server returned an invalid response. Please try again.'
+          );
+        }
+
+        let data;
+        try {
+          data = await response.json();
+        } catch (jsonError) {
+          const text = await response.text();
+          throw new Error(
+            text.includes('Request Entity Too Large') || text.includes('413')
+              ? 'Files are too large. Total size limit is approximately 10MB.'
+              : 'Server returned an invalid response. Please try again.'
+          );
+        }
 
         if (!response.ok) {
           throw new Error(data.error || 'Failed to analyze documents');
@@ -799,6 +870,19 @@ export default function Home() {
         currentOperation: 'Server processing ZIP archive...',
         details: ['Scanning archive structure...', 'Identifying supported files...'],
       } : null);
+
+      // Check if response is JSON
+      const contentType = extractResponse.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        const text = await extractResponse.text();
+        throw new Error(
+          text.includes('Request Entity Too Large') || text.includes('413')
+            ? 'File is too large. Please try a smaller ZIP file or split it into multiple archives.'
+            : text.includes('Request')
+            ? `Server error: ${text.substring(0, 200)}`
+            : 'Server returned an invalid response. Please try again.'
+        );
+      }
 
       const extractData = await extractResponse.json();
 
@@ -985,13 +1069,74 @@ export default function Home() {
     document.body.removeChild(a);
   }, []);
 
+  const [showExportMenu, setShowExportMenu] = useState(false);
+  const [showExportMenu2, setShowExportMenu2] = useState(false);
+  const exportMenuRef = useRef<HTMLDivElement>(null);
+  const exportMenuRef2 = useRef<HTMLDivElement>(null);
+
   const handleExportCSV = useCallback(() => {
     if (result && filteredAnalysis) {
       generateCSV(filteredAnalysis, currentFile?.name || 'Unknown');
     } else if (batchResult && filteredBatchAnalysis) {
       generateCSV(filteredBatchAnalysis, `Batch (${batchResult.successfulFiles} files)`);
     }
+    setShowExportMenu(false);
   }, [result, filteredAnalysis, batchResult, filteredBatchAnalysis, currentFile, generateCSV]);
+
+  const handleExportJSON = useCallback(() => {
+    const analysis = result && filteredAnalysis ? filteredAnalysis : (batchResult && filteredBatchAnalysis ? filteredBatchAnalysis : null);
+    const sourceInfo = result ? (currentFile?.name || 'Unknown') : (batchResult ? `Batch (${batchResult.successfulFiles} files)` : 'Unknown');
+    
+    if (analysis) {
+      const jsonContent = exportToJSON(analysis, sourceInfo);
+      const blob = new Blob([jsonContent], { type: 'application/json' });
+      downloadFile(blob, `file-analysis-${Date.now()}.json`);
+    }
+    setShowExportMenu(false);
+    setShowExportMenu2(false);
+  }, [result, filteredAnalysis, batchResult, filteredBatchAnalysis, currentFile]);
+
+  const handleExportExcel = useCallback(() => {
+    const analysis = result && filteredAnalysis ? filteredAnalysis : (batchResult && filteredBatchAnalysis ? filteredBatchAnalysis : null);
+    const sourceInfo = result ? (currentFile?.name || 'Unknown') : (batchResult ? `Batch (${batchResult.successfulFiles} files)` : 'Unknown');
+    
+    if (analysis) {
+      const blob = exportToExcel(analysis, sourceInfo);
+      downloadFile(blob, `file-analysis-${Date.now()}.xlsx`);
+    }
+    setShowExportMenu(false);
+    setShowExportMenu2(false);
+  }, [result, filteredAnalysis, batchResult, filteredBatchAnalysis, currentFile]);
+
+  const handleExportMarkdown = useCallback(() => {
+    const analysis = result && filteredAnalysis ? filteredAnalysis : (batchResult && filteredBatchAnalysis ? filteredBatchAnalysis : null);
+    const sourceInfo = result ? (currentFile?.name || 'Unknown') : (batchResult ? `Batch (${batchResult.successfulFiles} files)` : 'Unknown');
+    
+    if (analysis) {
+      const markdownContent = exportToMarkdown(analysis, sourceInfo);
+      const blob = new Blob([markdownContent], { type: 'text/markdown' });
+      downloadFile(blob, `file-analysis-${Date.now()}.md`);
+    }
+    setShowExportMenu(false);
+    setShowExportMenu2(false);
+  }, [result, filteredAnalysis, batchResult, filteredBatchAnalysis, currentFile]);
+
+  // Close export menus when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (exportMenuRef.current && !exportMenuRef.current.contains(event.target as Node)) {
+        setShowExportMenu(false);
+      }
+      if (exportMenuRef2.current && !exportMenuRef2.current.contains(event.target as Node)) {
+        setShowExportMenu2(false);
+      }
+    };
+
+    if (showExportMenu || showExportMenu2) {
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+    }
+  }, [showExportMenu, showExportMenu2]);
 
   const handleReset = useCallback(() => {
     setResult(null);
@@ -1461,14 +1606,70 @@ export default function Home() {
                   </svg>
                   Filter
                 </button>
-                <button onClick={handleExportCSV} className="btn-primary text-sm flex items-center gap-2">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                    <polyline points="7 10 12 15 17 10" />
-                    <line x1="12" y1="15" x2="12" y2="3" />
-                  </svg>
-                  CSV
-                </button>
+                <div className="relative" ref={exportMenuRef}>
+                  <button 
+                    onClick={() => setShowExportMenu(!showExportMenu)} 
+                    className="btn-primary text-sm flex items-center gap-2"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                      <polyline points="7 10 12 15 17 10" />
+                      <line x1="12" y1="15" x2="12" y2="3" />
+                    </svg>
+                    Export
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <polyline points="6 9 12 15 18 9" />
+                    </svg>
+                  </button>
+                  {showExportMenu && (
+                    <div className="absolute right-0 mt-2 w-48 bg-[var(--bg-primary)] border border-[var(--border-color)] rounded-lg shadow-xl z-50 overflow-hidden">
+                      <button
+                        onClick={handleExportCSV}
+                        className="w-full text-left px-4 py-2.5 text-sm text-[var(--text-primary)] hover:bg-[var(--bg-secondary)] flex items-center gap-2 transition-colors"
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                          <polyline points="7 10 12 15 17 10" />
+                          <line x1="12" y1="15" x2="12" y2="3" />
+                        </svg>
+                        CSV
+                      </button>
+                      <button
+                        onClick={handleExportJSON}
+                        className="w-full text-left px-4 py-2.5 text-sm text-[var(--text-primary)] hover:bg-[var(--bg-secondary)] flex items-center gap-2 transition-colors"
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M4 7V4h16v3M9 20h6M12 4v16m-8 0h16" />
+                        </svg>
+                        JSON
+                      </button>
+                      <button
+                        onClick={handleExportExcel}
+                        className="w-full text-left px-4 py-2.5 text-sm text-[var(--text-primary)] hover:bg-[var(--bg-secondary)] flex items-center gap-2 transition-colors"
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <rect x="3" y="3" width="18" height="18" rx="2" />
+                          <line x1="3" y1="9" x2="21" y2="9" />
+                          <line x1="9" y1="21" x2="9" y2="9" />
+                        </svg>
+                        Excel
+                      </button>
+                      <button
+                        onClick={handleExportMarkdown}
+                        className="w-full text-left px-4 py-2.5 text-sm text-[var(--text-primary)] hover:bg-[var(--bg-secondary)] flex items-center gap-2 transition-colors"
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                          <polyline points="14 2 14 8 20 8" />
+                          <line x1="16" y1="13" x2="8" y2="13" />
+                          <line x1="16" y1="17" x2="8" y2="17" />
+                          <polyline points="10 9 9 9 8 9" />
+                        </svg>
+                        Markdown
+                      </button>
+                    </div>
+                  )}
+                </div>
                 <button onClick={handleReset} className="btn-secondary text-sm flex items-center gap-2">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
@@ -1630,14 +1831,70 @@ export default function Home() {
                       </button>
                     )}
                     
-                    <button onClick={handleExportCSV} className="btn-primary text-sm flex items-center gap-2">
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                        <polyline points="7 10 12 15 17 10" />
-                        <line x1="12" y1="15" x2="12" y2="3" />
-                      </svg>
-                      CSV
-                    </button>
+                    <div className="relative" ref={exportMenuRef2}>
+                      <button 
+                        onClick={() => setShowExportMenu2(!showExportMenu2)} 
+                        className="btn-primary text-sm flex items-center gap-2"
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                          <polyline points="7 10 12 15 17 10" />
+                          <line x1="12" y1="15" x2="12" y2="3" />
+                        </svg>
+                        Export
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <polyline points="6 9 12 15 18 9" />
+                        </svg>
+                      </button>
+                      {showExportMenu2 && (
+                        <div className="absolute right-0 mt-2 w-48 bg-[var(--bg-primary)] border border-[var(--border-color)] rounded-lg shadow-xl z-50 overflow-hidden">
+                          <button
+                            onClick={handleExportCSV}
+                            className="w-full text-left px-4 py-2.5 text-sm text-[var(--text-primary)] hover:bg-[var(--bg-secondary)] flex items-center gap-2 transition-colors"
+                          >
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                              <polyline points="7 10 12 15 17 10" />
+                              <line x1="12" y1="15" x2="12" y2="3" />
+                            </svg>
+                            CSV
+                          </button>
+                          <button
+                            onClick={handleExportJSON}
+                            className="w-full text-left px-4 py-2.5 text-sm text-[var(--text-primary)] hover:bg-[var(--bg-secondary)] flex items-center gap-2 transition-colors"
+                          >
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M4 7V4h16v3M9 20h6M12 4v16m-8 0h16" />
+                            </svg>
+                            JSON
+                          </button>
+                          <button
+                            onClick={handleExportExcel}
+                            className="w-full text-left px-4 py-2.5 text-sm text-[var(--text-primary)] hover:bg-[var(--bg-secondary)] flex items-center gap-2 transition-colors"
+                          >
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <rect x="3" y="3" width="18" height="18" rx="2" />
+                              <line x1="3" y1="9" x2="21" y2="9" />
+                              <line x1="9" y1="21" x2="9" y2="9" />
+                            </svg>
+                            Excel
+                          </button>
+                          <button
+                            onClick={handleExportMarkdown}
+                            className="w-full text-left px-4 py-2.5 text-sm text-[var(--text-primary)] hover:bg-[var(--bg-secondary)] flex items-center gap-2 transition-colors"
+                          >
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                              <polyline points="14 2 14 8 20 8" />
+                              <line x1="16" y1="13" x2="8" y2="13" />
+                              <line x1="16" y1="17" x2="8" y2="17" />
+                              <polyline points="10 9 9 9 8 9" />
+                            </svg>
+                            Markdown
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>

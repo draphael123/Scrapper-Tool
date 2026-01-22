@@ -5,6 +5,10 @@ import { analyzeWithAI, isAIAvailable, AIAnalysisResult } from '@/lib/aiAnalyzer
 import { CONFIG, isValidFileType, isValidFileSize } from '@/lib/config';
 import { logger } from '@/lib/logger';
 import { generateRequestId, errorResponse, handleApiError, ErrorCodes } from '@/lib/apiUtils';
+import { RATE_LIMITS, checkRateLimit, getClientId } from '@/lib/rateLimit';
+import { sanitizeFileName } from '@/lib/sanitize';
+import { validateFileArray, validateBoolean } from '@/lib/validation';
+import { metrics } from '@/lib/metrics';
 
 export const runtime = 'nodejs';
 export const maxDuration = 120; // CONFIG.BATCH_TIMEOUT
@@ -90,11 +94,40 @@ function mergeAnalysisResults(
 
 export async function POST(request: NextRequest) {
   const requestId = generateRequestId();
+  const startTime = Date.now();
+  const clientId = getClientId(request);
   
   try {
+    // Rate limiting for batch operations
+    const rateLimitResult = checkRateLimit(clientId, RATE_LIMITS.BATCH);
+    if (!rateLimitResult.allowed) {
+      metrics.increment('rate_limit_exceeded', { endpoint: 'analyze-batch' });
+      return errorResponse(
+        'Too many batch requests. Please try again later.',
+        ErrorCodes.RATE_LIMIT_ERROR,
+        429,
+        { resetTime: new Date(rateLimitResult.resetTime).toISOString() },
+        requestId
+      );
+    }
+
     const formData = await request.formData();
-    const files = formData.getAll('files') as File[];
-    const useAI = formData.get('useAI') === 'true';
+    const filesInput = formData.getAll('files') as File[];
+    const useAI = validateBoolean(formData.get('useAI'));
+
+    // Validate files
+    const filesValidation = validateFileArray(filesInput);
+    if (!filesValidation.success) {
+      metrics.increment('validation_error', { endpoint: 'analyze-batch' });
+      return errorResponse(
+        filesValidation.error || 'Invalid files',
+        ErrorCodes.VALIDATION_ERROR,
+        400,
+        undefined,
+        requestId
+      );
+    }
+    const files = filesValidation.data!;
 
     logger.info('Batch analysis request', { 
       requestId, 
@@ -139,12 +172,13 @@ export async function POST(request: NextRequest) {
 
     // Process each file
     for (const file of files) {
-      const ext = file.name.toLowerCase().split('.').pop();
+      const sanitizedName = sanitizeFileName(file.name);
+      const ext = sanitizedName.toLowerCase().split('.').pop();
       
       // Skip non-supported files
       if (!ext || !CONFIG.SUPPORTED_EXTENSIONS.includes(ext as any)) {
         results.push({
-          fileName: file.name,
+          fileName: sanitizedName,
           fileType: ext || 'unknown',
           success: false,
           error: `Unsupported file type. Only PDF and DOCX are supported.`,
@@ -158,25 +192,25 @@ export async function POST(request: NextRequest) {
         const buffer = Buffer.from(arrayBuffer);
 
         // Parse the document
-        const parseResult = await parseDocument(buffer, file.name);
+        const parseResult = await parseDocument(buffer, sanitizedName);
 
         if (!parseResult.success) {
-          results.push({
-            fileName: file.name,
-            fileType: ext,
-            success: false,
-            error: parseResult.error || 'Failed to parse document',
-          });
+        results.push({
+          fileName: sanitizedName,
+          fileType: ext,
+          success: false,
+          error: parseResult.error || 'Failed to parse document',
+        });
           continue;
         }
 
         if (!parseResult.text || parseResult.text.trim().length === 0) {
-          results.push({
-            fileName: file.name,
-            fileType: ext,
-            success: false,
-            error: 'Document is empty or contains no extractable text.',
-          });
+        results.push({
+          fileName: sanitizedName,
+          fileType: ext,
+          success: false,
+          error: 'Document is empty or contains no extractable text.',
+        });
           continue;
         }
 
@@ -218,7 +252,7 @@ export async function POST(request: NextRequest) {
         }
 
         results.push({
-          fileName: file.name,
+          fileName: sanitizedName,
           fileType: ext,
           success: true,
           analysis,
@@ -226,15 +260,16 @@ export async function POST(request: NextRequest) {
           pageCount: parseResult.pageCount,
         });
 
-        successfulAnalyses.push({ fileName: file.name, analysis });
+        successfulAnalyses.push({ fileName: sanitizedName, analysis });
 
       } catch (error) {
         results.push({
-          fileName: file.name,
+          fileName: sanitizedName,
           fileType: ext,
           success: false,
           error: error instanceof Error ? error.message : 'Unknown error',
         });
+        metrics.increment('batch_file_error');
       }
     }
 
@@ -261,20 +296,35 @@ export async function POST(request: NextRequest) {
       combinedAnalysis,
     };
 
+    const totalTime = Date.now() - startTime;
+    metrics.timing('batch_analysis_total', totalTime);
+    metrics.increment('batch_analysis_complete', { 
+      totalFiles: batchResult.totalFiles.toString(),
+      successfulFiles: batchResult.successfulFiles.toString()
+    });
+    
     logger.info('Batch analysis complete', { 
       requestId, 
       totalFiles: batchResult.totalFiles,
       successfulFiles: batchResult.successfulFiles,
-      failedFiles: batchResult.failedFiles
+      failedFiles: batchResult.failedFiles,
+      duration: totalTime
     });
 
-    return NextResponse.json({
+    const response = NextResponse.json({
       success: true,
       aiAvailable: isAIAvailable(),
       aiUsed: useAI && isAIAvailable(),
       ...batchResult,
       requestId,
     });
+
+    // Add rate limit headers
+    response.headers.set('X-RateLimit-Limit', RATE_LIMITS.BATCH.maxRequests.toString());
+    response.headers.set('X-RateLimit-Remaining', rateLimitResult.remaining.toString());
+    response.headers.set('X-RateLimit-Reset', rateLimitResult.resetTime.toString());
+
+    return response;
 
   } catch (error) {
     return handleApiError(error, requestId);

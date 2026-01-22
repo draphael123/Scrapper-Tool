@@ -3,6 +3,10 @@ import JSZip from 'jszip';
 import { CONFIG, isValidFileSize } from '@/lib/config';
 import { logger } from '@/lib/logger';
 import { generateRequestId, errorResponse, handleApiError, ErrorCodes } from '@/lib/apiUtils';
+import { RATE_LIMITS, checkRateLimit, getClientId } from '@/lib/rateLimit';
+import { sanitizeFilePath, sanitizeFileName } from '@/lib/sanitize';
+import { validateFile, validateBoolean } from '@/lib/validation';
+import { metrics } from '@/lib/metrics';
 
 export const runtime = 'nodejs';
 export const maxDuration = 60; // CONFIG.ZIP_TIMEOUT
@@ -16,11 +20,40 @@ interface ExtractedFile {
 
 export async function POST(request: NextRequest) {
   const requestId = generateRequestId();
+  const startTime = Date.now();
+  const clientId = getClientId(request);
   
   try {
+    // Rate limiting
+    const rateLimitResult = checkRateLimit(clientId, RATE_LIMITS.UPLOAD);
+    if (!rateLimitResult.allowed) {
+      metrics.increment('rate_limit_exceeded', { endpoint: 'extract-zip' });
+      return errorResponse(
+        'Too many requests. Please try again later.',
+        ErrorCodes.RATE_LIMIT_ERROR,
+        429,
+        { resetTime: new Date(rateLimitResult.resetTime).toISOString() },
+        requestId
+      );
+    }
+
     const formData = await request.formData();
-    const file = formData.get('file') as File;
-    const includeSubfolders = formData.get('includeSubfolders') === 'true';
+    const fileInput = formData.get('file') as File | null;
+    const includeSubfolders = validateBoolean(formData.get('includeSubfolders'));
+
+    // Validate file
+    const fileValidation = validateFile(fileInput);
+    if (!fileValidation.success) {
+      metrics.increment('validation_error', { endpoint: 'extract-zip' });
+      return errorResponse(
+        fileValidation.error || 'Invalid file',
+        ErrorCodes.VALIDATION_ERROR,
+        400,
+        undefined,
+        requestId
+      );
+    }
+    const file = fileValidation.data!;
 
     logger.info('ZIP extraction request', { 
       requestId, 
@@ -74,19 +107,26 @@ export async function POST(request: NextRequest) {
       // Skip directories
       if (zipEntry.dir) return;
 
+      // Sanitize and validate file path
+      const pathValidation = sanitizeFilePath(relativePath);
+      if (!pathValidation.isValid) {
+        logger.warn('Invalid file path in ZIP', { path: relativePath, requestId });
+        return;
+      }
+
       // Get file extension
-      const fileExt = relativePath.toLowerCase().split('.').pop();
+      const fileExt = pathValidation.sanitized.toLowerCase().split('.').pop();
       if (!fileExt || !CONFIG.SUPPORTED_EXTENSIONS.includes(fileExt as any)) return;
 
       // Check if we should include subfolders
-      const pathParts = relativePath.split('/');
+      const pathParts = pathValidation.sanitized.split('/');
       if (!includeSubfolders && pathParts.length > 1) {
         // File is in a subfolder, skip it
         return;
       }
 
-      // Get just the filename
-      const fileName = pathParts[pathParts.length - 1];
+      // Get just the filename and sanitize it
+      const fileName = sanitizeFileName(pathParts[pathParts.length - 1]);
 
       // Skip hidden files
       if (fileName.startsWith('.')) return;
@@ -96,7 +136,7 @@ export async function POST(request: NextRequest) {
         const estimatedSize = Math.floor(data.length * 0.75);
         extractedFiles.push({
           name: fileName,
-          path: relativePath,
+          path: pathValidation.sanitized,
           size: estimatedSize,
           data,
         });
@@ -122,17 +162,29 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const totalTime = Date.now() - startTime;
+    metrics.timing('zip_extraction', totalTime);
+    metrics.increment('zip_extraction_success', { fileCount: extractedFiles.length.toString() });
+    
     logger.info('ZIP extraction complete', { 
       requestId, 
-      totalFiles: extractedFiles.length 
+      totalFiles: extractedFiles.length,
+      duration: totalTime
     });
 
-    return NextResponse.json({
+    const response = NextResponse.json({
       success: true,
       totalFiles: extractedFiles.length,
       files: extractedFiles,
       requestId,
     });
+
+    // Add rate limit headers
+    response.headers.set('X-RateLimit-Limit', RATE_LIMITS.UPLOAD.maxRequests.toString());
+    response.headers.set('X-RateLimit-Remaining', rateLimitResult.remaining.toString());
+    response.headers.set('X-RateLimit-Reset', rateLimitResult.resetTime.toString());
+
+    return response;
 
   } catch (error) {
     return handleApiError(error, requestId);

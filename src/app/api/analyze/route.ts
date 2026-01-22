@@ -1,10 +1,14 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest } from 'next/server';
 import { parseDocument } from '@/lib/documentParser';
 import { analyzeDocument, exportToCSV, ExtractionResult } from '@/lib/fileNameExtractor';
 import { analyzeWithAI, isAIAvailable, AIAnalysisResult } from '@/lib/aiAnalyzer';
+import { CONFIG, isValidFileType, isValidFileSize } from '@/lib/config';
+import { logger } from '@/lib/logger';
+import { generateRequestId, errorResponse, handleApiError, ErrorCodes } from '@/lib/apiUtils';
+import { NextResponse } from 'next/server';
 
 export const runtime = 'nodejs';
-export const maxDuration = 60; // Allow longer for AI analysis
+export const maxDuration = 60; // CONFIG.DEFAULT_TIMEOUT
 
 // Convert AI result to standard format for consistent UI handling
 function convertAIResultToStandard(aiResult: AIAnalysisResult): ExtractionResult & { aiEnhanced: true; summary: string; documentType: string } {
@@ -28,40 +32,60 @@ function convertAIResultToStandard(aiResult: AIAnalysisResult): ExtractionResult
 }
 
 export async function GET() {
-  // Check if AI is available
+  const requestId = generateRequestId();
+  logger.info('AI availability check', { requestId });
+  
   return NextResponse.json({
-    aiAvailable: isAIAvailable()
+    aiAvailable: isAIAvailable(),
+    requestId,
   });
 }
 
 export async function POST(request: NextRequest) {
+  const requestId = generateRequestId();
+  
   try {
     const formData = await request.formData();
     const file = formData.get('file') as File | null;
     const exportCSVFlag = formData.get('exportCSV') === 'true';
     const useAI = formData.get('useAI') === 'true';
 
+    logger.info('Document analysis request', { 
+      requestId, 
+      fileName: file?.name, 
+      fileSize: file?.size,
+      useAI 
+    });
+
     if (!file) {
-      return NextResponse.json(
-        { error: 'No file provided' },
-        { status: 400 }
+      return errorResponse(
+        'No file provided',
+        ErrorCodes.VALIDATION_ERROR,
+        400,
+        undefined,
+        requestId
+      );
+    }
+
+    // Validate file size
+    if (!isValidFileSize(file.size)) {
+      return errorResponse(
+        `File size (${(file.size / 1024 / 1024).toFixed(2)} MB) exceeds the maximum allowed limit of ${CONFIG.MAX_FILE_SIZE / 1024 / 1024} MB`,
+        ErrorCodes.FILE_TOO_LARGE,
+        413,
+        { fileSize: file.size, maxSize: CONFIG.MAX_FILE_SIZE },
+        requestId
       );
     }
 
     // Validate file type
-    const validTypes = [
-      'application/pdf',
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    ];
-    
-    const isValidType = validTypes.includes(file.type) || 
-      file.name.endsWith('.pdf') || 
-      file.name.endsWith('.docx');
-
-    if (!isValidType) {
-      return NextResponse.json(
-        { error: 'Invalid file type. Please upload a PDF or Word document (.docx).' },
-        { status: 400 }
+    if (!isValidFileType(file)) {
+      return errorResponse(
+        'Invalid file type. Please upload a PDF or Word document (.docx).',
+        ErrorCodes.INVALID_FILE_TYPE,
+        400,
+        { fileName: file.name, fileType: file.type },
+        requestId
       );
     }
 
@@ -76,16 +100,22 @@ export async function POST(request: NextRequest) {
     const parseResult = await parseDocument(buffer, file.name);
 
     if (!parseResult.success) {
-      return NextResponse.json(
-        { error: parseResult.error || 'Failed to parse document' },
-        { status: 400 }
+      return errorResponse(
+        parseResult.error || 'Failed to parse document',
+        ErrorCodes.PARSE_ERROR,
+        400,
+        { fileName: file.name },
+        requestId
       );
     }
 
     if (!parseResult.text || parseResult.text.trim().length === 0) {
-      return NextResponse.json(
-        { error: 'The document appears to be empty or contains no extractable text.' },
-        { status: 400 }
+      return errorResponse(
+        'The document appears to be empty or contains no extractable text.',
+        ErrorCodes.PARSE_ERROR,
+        400,
+        { fileName: file.name },
+        requestId
       );
     }
 
@@ -102,7 +132,7 @@ export async function POST(request: NextRequest) {
           analysisResult = { ...analyzeDocument(parseResult.text), aiEnhanced: false };
         }
       } catch (aiError) {
-        console.error('AI analysis failed, falling back to regex:', aiError);
+        logger.warn('AI analysis failed, falling back to regex', { error: aiError, requestId });
         analysisResult = { ...analyzeDocument(parseResult.text), aiEnhanced: false };
       }
     } else {
@@ -122,6 +152,12 @@ export async function POST(request: NextRequest) {
     }
 
     // Return analysis results
+    logger.info('Document analysis complete', { 
+      requestId, 
+      fileName: file.name,
+      totalFound: analysisResult.totalFound 
+    });
+
     return NextResponse.json({
       success: true,
       fileName: file.name,
@@ -130,14 +166,11 @@ export async function POST(request: NextRequest) {
       textLength: parseResult.text.length,
       analysis: analysisResult,
       aiAvailable: isAIAvailable(),
-      aiUsed: useAI && isAIAvailable()
+      aiUsed: useAI && isAIAvailable(),
+      requestId,
     });
 
   } catch (error) {
-    console.error('Error processing document:', error);
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'An unexpected error occurred' },
-      { status: 500 }
-    );
+    return handleApiError(error, requestId);
   }
 }

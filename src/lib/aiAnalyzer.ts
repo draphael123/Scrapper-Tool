@@ -1,4 +1,6 @@
 import OpenAI from 'openai';
+import { getOpenAIApiKey, CONFIG } from './config';
+import { logger } from './logger';
 
 export interface AIExtractedFile {
   name: string;
@@ -60,7 +62,7 @@ Respond in valid JSON only, with this exact structure:
 
 // Create OpenAI client (will use OPENAI_API_KEY env var)
 function getOpenAIClient(): OpenAI | null {
-  const apiKey = process.env.OPENAI_API_KEY;
+  const apiKey = getOpenAIApiKey();
   if (!apiKey) {
     return null;
   }
@@ -77,19 +79,18 @@ export async function analyzeWithAI(
   const client = getOpenAIClient();
   
   if (!client) {
-    console.error('OpenAI API key not configured');
+    logger.warn('OpenAI API key not configured');
     return null;
   }
 
   // Truncate very long documents to fit context window
-  const maxChars = 100000; // ~25k tokens
-  const truncatedText = text.length > maxChars 
-    ? text.substring(0, maxChars) + '\n\n[Document truncated due to length...]'
+  const truncatedText = text.length > CONFIG.AI_MAX_CHARS 
+    ? text.substring(0, CONFIG.AI_MAX_CHARS) + '\n\n[Document truncated due to length...]'
     : text;
 
   try {
     const response = await client.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: CONFIG.AI_MODEL,
       messages: [
         {
           role: 'system',
@@ -100,7 +101,7 @@ export async function analyzeWithAI(
           content: `Analyze this ${fileType.toUpperCase()} document and extract all file names:\n\n${truncatedText}`
         }
       ],
-      temperature: 0.1, // Low temperature for consistent extraction
+      temperature: CONFIG.AI_TEMPERATURE,
       response_format: { type: 'json_object' }
     });
 
@@ -139,7 +140,7 @@ export async function analyzeWithAI(
     };
 
   } catch (error) {
-    console.error('AI analysis error:', error);
+    logger.error('AI analysis error', error, { fileType });
     throw error;
   }
 }
@@ -148,7 +149,7 @@ export async function analyzeWithAI(
  * Check if AI analysis is available (API key configured)
  */
 export function isAIAvailable(): boolean {
-  return !!process.env.OPENAI_API_KEY;
+  return !!getOpenAIApiKey();
 }
 
 /**
@@ -188,7 +189,7 @@ export async function suggestScrapingRules(
     return parsed.patterns || parsed.regexPatterns || [];
 
   } catch (error) {
-    console.error('Error suggesting scraping rules:', error);
+    logger.error('Error suggesting scraping rules', error);
     return [];
   }
 }

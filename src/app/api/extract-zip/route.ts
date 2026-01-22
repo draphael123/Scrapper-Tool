@@ -1,8 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import JSZip from 'jszip';
+import { CONFIG, isValidFileSize } from '@/lib/config';
+import { logger } from '@/lib/logger';
+import { generateRequestId, errorResponse, handleApiError, ErrorCodes } from '@/lib/apiUtils';
 
 export const runtime = 'nodejs';
-export const maxDuration = 60;
+export const maxDuration = 60; // CONFIG.ZIP_TIMEOUT
 
 interface ExtractedFile {
   name: string;
@@ -12,23 +15,49 @@ interface ExtractedFile {
 }
 
 export async function POST(request: NextRequest) {
+  const requestId = generateRequestId();
+  
   try {
     const formData = await request.formData();
     const file = formData.get('file') as File;
     const includeSubfolders = formData.get('includeSubfolders') === 'true';
 
+    logger.info('ZIP extraction request', { 
+      requestId, 
+      fileName: file?.name,
+      fileSize: file?.size,
+      includeSubfolders 
+    });
+
     if (!file) {
-      return NextResponse.json(
-        { error: 'No file provided' },
-        { status: 400 }
+      return errorResponse(
+        'No file provided',
+        ErrorCodes.VALIDATION_ERROR,
+        400,
+        undefined,
+        requestId
+      );
+    }
+
+    // Validate file size
+    if (!isValidFileSize(file.size, CONFIG.MAX_ZIP_SIZE)) {
+      return errorResponse(
+        `ZIP file size (${(file.size / 1024 / 1024).toFixed(2)} MB) exceeds the maximum allowed limit of ${CONFIG.MAX_ZIP_SIZE / 1024 / 1024} MB`,
+        ErrorCodes.FILE_TOO_LARGE,
+        413,
+        { fileSize: file.size, maxSize: CONFIG.MAX_ZIP_SIZE },
+        requestId
       );
     }
 
     const ext = file.name.toLowerCase().split('.').pop();
     if (ext !== 'zip') {
-      return NextResponse.json(
-        { error: 'File must be a ZIP archive' },
-        { status: 400 }
+      return errorResponse(
+        'File must be a ZIP archive',
+        ErrorCodes.INVALID_FILE_TYPE,
+        400,
+        { fileName: file.name, fileType: ext },
+        requestId
       );
     }
 
@@ -37,7 +66,6 @@ export async function POST(request: NextRequest) {
     const zip = await JSZip.loadAsync(arrayBuffer);
 
     const extractedFiles: ExtractedFile[] = [];
-    const validExtensions = ['pdf', 'docx'];
 
     // Process each file in the ZIP
     const promises: Promise<void>[] = [];
@@ -48,7 +76,7 @@ export async function POST(request: NextRequest) {
 
       // Get file extension
       const fileExt = relativePath.toLowerCase().split('.').pop();
-      if (!fileExt || !validExtensions.includes(fileExt)) return;
+      if (!fileExt || !CONFIG.SUPPORTED_EXTENSIONS.includes(fileExt as any)) return;
 
       // Check if we should include subfolders
       const pathParts = relativePath.split('/');
@@ -80,29 +108,34 @@ export async function POST(request: NextRequest) {
     await Promise.all(promises);
 
     if (extractedFiles.length === 0) {
-      return NextResponse.json(
+      return errorResponse(
+        'No PDF or Word documents found in the ZIP archive',
+        ErrorCodes.VALIDATION_ERROR,
+        400,
         { 
-          error: 'No PDF or Word documents found in the ZIP archive',
           hint: includeSubfolders 
             ? 'The archive contains no supported files.' 
-            : 'Try enabling "Include Subfolders" if files are in nested directories.'
+            : 'Try enabling "Include Subfolders" if files are in nested directories.',
+          includeSubfolders 
         },
-        { status: 400 }
+        requestId
       );
     }
+
+    logger.info('ZIP extraction complete', { 
+      requestId, 
+      totalFiles: extractedFiles.length 
+    });
 
     return NextResponse.json({
       success: true,
       totalFiles: extractedFiles.length,
       files: extractedFiles,
+      requestId,
     });
 
   } catch (error) {
-    console.error('Error extracting ZIP:', error);
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Failed to extract ZIP file' },
-      { status: 500 }
-    );
+    return handleApiError(error, requestId);
   }
 }
 

@@ -1,4 +1,6 @@
 import { extractText } from 'unpdf';
+import { logger } from './logger';
+import { CONFIG } from './config';
 
 export interface ParseResult {
   success: boolean;
@@ -11,7 +13,7 @@ export interface ParseResult {
  * Extract text from a PDF file buffer using unpdf (server-friendly)
  * Includes retry logic and detailed error handling
  */
-export async function parsePDF(buffer: Buffer, retries = 2): Promise<ParseResult> {
+export async function parsePDF(buffer: Buffer, retries = CONFIG.MAX_RETRIES): Promise<ParseResult> {
   let lastError: Error | null = null;
   
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -46,7 +48,7 @@ export async function parsePDF(buffer: Buffer, retries = 2): Promise<ParseResult
       };
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
-      console.error(`PDF parsing attempt ${attempt + 1} failed:`, lastError.message);
+      logger.debug(`PDF parsing attempt ${attempt + 1} failed`, { error: lastError.message });
       
       // Don't retry for certain errors
       if (lastError.message.includes('Invalid PDF') || 
@@ -112,7 +114,7 @@ export async function parseWord(buffer: Buffer): Promise<ParseResult> {
       text: result.value || '',
     };
   } catch (error) {
-    console.error('Word parsing error:', error);
+    logger.error('Word parsing error', error);
     
     let errorMessage = error instanceof Error ? error.message : 'Failed to parse Word document';
     

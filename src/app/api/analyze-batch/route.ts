@@ -2,9 +2,12 @@ import { NextRequest, NextResponse } from 'next/server';
 import { parseDocument } from '@/lib/documentParser';
 import { analyzeDocument, ExtractionResult } from '@/lib/fileNameExtractor';
 import { analyzeWithAI, isAIAvailable, AIAnalysisResult } from '@/lib/aiAnalyzer';
+import { CONFIG, isValidFileType, isValidFileSize } from '@/lib/config';
+import { logger } from '@/lib/logger';
+import { generateRequestId, errorResponse, handleApiError, ErrorCodes } from '@/lib/apiUtils';
 
 export const runtime = 'nodejs';
-export const maxDuration = 120; // Allow longer for batch processing
+export const maxDuration = 120; // CONFIG.BATCH_TIMEOUT
 
 interface FileResult {
   fileName: string;
@@ -86,19 +89,51 @@ function mergeAnalysisResults(
 }
 
 export async function POST(request: NextRequest) {
+  const requestId = generateRequestId();
+  
   try {
     const formData = await request.formData();
     const files = formData.getAll('files') as File[];
     const useAI = formData.get('useAI') === 'true';
 
+    logger.info('Batch analysis request', { 
+      requestId, 
+      fileCount: files.length,
+      useAI 
+    });
+
     if (!files || files.length === 0) {
-      return NextResponse.json(
-        { error: 'No files provided' },
-        { status: 400 }
+      return errorResponse(
+        'No files provided',
+        ErrorCodes.VALIDATION_ERROR,
+        400,
+        undefined,
+        requestId
       );
     }
 
-    const validExtensions = ['pdf', 'docx'];
+    if (files.length > CONFIG.MAX_BATCH_FILES) {
+      return errorResponse(
+        `Too many files. Maximum allowed is ${CONFIG.MAX_BATCH_FILES} files per batch.`,
+        ErrorCodes.VALIDATION_ERROR,
+        400,
+        { fileCount: files.length, maxFiles: CONFIG.MAX_BATCH_FILES },
+        requestId
+      );
+    }
+
+    // Validate total size
+    const totalSize = files.reduce((sum, f) => sum + f.size, 0);
+    if (!isValidFileSize(totalSize, CONFIG.MAX_BATCH_SIZE)) {
+      return errorResponse(
+        `Total file size (${(totalSize / 1024 / 1024).toFixed(2)} MB) exceeds the maximum allowed limit of ${CONFIG.MAX_BATCH_SIZE / 1024 / 1024} MB`,
+        ErrorCodes.FILE_TOO_LARGE,
+        413,
+        { totalSize, maxSize: CONFIG.MAX_BATCH_SIZE },
+        requestId
+      );
+    }
+
     const results: FileResult[] = [];
     const successfulAnalyses: Array<{ fileName: string; analysis: ExtractionResult & { aiEnhanced?: boolean } }> = [];
 
@@ -107,7 +142,7 @@ export async function POST(request: NextRequest) {
       const ext = file.name.toLowerCase().split('.').pop();
       
       // Skip non-supported files
-      if (!ext || !validExtensions.includes(ext)) {
+      if (!ext || !CONFIG.SUPPORTED_EXTENSIONS.includes(ext as any)) {
         results.push({
           fileName: file.name,
           fileType: ext || 'unknown',
@@ -170,7 +205,12 @@ export async function POST(request: NextRequest) {
             } else {
               analysis = { ...analyzeDocument(parseResult.text), aiEnhanced: false };
             }
-          } catch {
+          } catch (aiError) {
+            logger.warn('AI analysis failed for batch file, falling back to regex', { 
+              error: aiError, 
+              fileName: file.name,
+              requestId 
+            });
             analysis = { ...analyzeDocument(parseResult.text), aiEnhanced: false };
           }
         } else {
@@ -221,19 +261,23 @@ export async function POST(request: NextRequest) {
       combinedAnalysis,
     };
 
+    logger.info('Batch analysis complete', { 
+      requestId, 
+      totalFiles: batchResult.totalFiles,
+      successfulFiles: batchResult.successfulFiles,
+      failedFiles: batchResult.failedFiles
+    });
+
     return NextResponse.json({
       success: true,
       aiAvailable: isAIAvailable(),
       aiUsed: useAI && isAIAvailable(),
       ...batchResult,
+      requestId,
     });
 
   } catch (error) {
-    console.error('Error processing batch:', error);
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'An unexpected error occurred' },
-      { status: 500 }
-    );
+    return handleApiError(error, requestId);
   }
 }
 

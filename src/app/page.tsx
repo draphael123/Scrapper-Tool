@@ -550,7 +550,9 @@ export default function Home() {
       }
 
       if (!response.ok) {
-        throw new Error(data.error || 'Failed to analyze document');
+        // Handle new standardized error format
+        const errorMessage = data.error?.message || data.error || 'Failed to analyze document';
+        throw new Error(errorMessage);
       }
 
       setResult(data);
@@ -675,12 +677,14 @@ export default function Home() {
               ],
             } : null);
           } else {
-            results.push({ fileName: file.name, success: false, error: data.error || 'Unknown error' });
+            // Handle new standardized error format
+            const errorMessage = data.error?.message || data.error || 'Unknown error';
+            results.push({ fileName: file.name, success: false, error: errorMessage });
             setProgressData(prev => prev ? {
               ...prev,
               failedFiles: prev.failedFiles + 1,
               currentOperation: `Failed to process ${file.name}`,
-              details: [`✗ Error: ${data.error || 'Unknown error'}`],
+              details: [`✗ Error: ${errorMessage}`],
             } : null);
           }
         } catch (err) {
@@ -809,7 +813,9 @@ export default function Home() {
         }
 
         if (!response.ok) {
-          throw new Error(data.error || 'Failed to analyze documents');
+          // Handle new standardized error format
+          const errorMessage = data.error?.message || data.error || 'Failed to analyze documents';
+          throw new Error(errorMessage);
         }
 
         setProgressData(prev => prev ? { ...prev, currentIndex: validFiles.length, stage: 'complete' } : null);
@@ -887,7 +893,9 @@ export default function Home() {
       const extractData = await extractResponse.json();
 
       if (!extractResponse.ok) {
-        throw new Error(extractData.error || 'Failed to extract ZIP file');
+        // Handle new standardized error format
+        const errorMessage = extractData.error?.message || extractData.error || 'Failed to extract ZIP file';
+        throw new Error(errorMessage);
       }
 
       const totalFiles = extractData.files?.length || 0;

@@ -872,7 +872,7 @@ export default function Home() {
           file.name,
           file.extension,
           group.pattern,
-          file.confidence ? String(Math.round(file.confidence * 100)) + '%' : '',
+          file.confidence ? String(Math.round(Number(file.confidence) * 100)) + '%' : '',
           analysis.duplicates.includes(file.name) ? 'Yes' : 'No',
           sourceInfo
         ]);

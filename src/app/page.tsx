@@ -8,6 +8,14 @@ import { Tooltip } from '@/components/Tooltip';
 import ProgressIndicator from '@/components/ProgressIndicator';
 import { AnalysisOptions, DEFAULT_OPTIONS } from '@/lib/types';
 
+// Extend input element to include non-standard directory upload attributes
+declare module 'react' {
+  interface InputHTMLAttributes<T> {
+    webkitdirectory?: string;
+    directory?: string;
+  }
+}
+
 interface ExtractedFileName {
   name: string;
   extension: string;
@@ -1096,9 +1104,7 @@ export default function Home() {
               <input
                 ref={folderInputRef}
                 type="file"
-                // @ts-expect-error webkitdirectory is a non-standard attribute
                 webkitdirectory=""
-                // @ts-expect-error directory is a non-standard attribute
                 directory=""
                 multiple
                 onChange={handleFolderSelect}

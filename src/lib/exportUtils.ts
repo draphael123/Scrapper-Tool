@@ -89,7 +89,7 @@ export function exportToExcel(analysis: AnalysisResult, sourceInfo: string): Blo
     patternsData.push([
       group.pattern,
       group.description || '',
-      group.count,
+      String(group.count),
       fileNames,
     ]);
   }

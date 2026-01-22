@@ -64,10 +64,12 @@ export async function POST(request: NextRequest) {
       if (fileName.startsWith('.')) return;
 
       const promise = zipEntry.async('base64').then((data) => {
+        // Calculate size from base64 data (base64 is ~4/3 of original size)
+        const estimatedSize = Math.floor(data.length * 0.75);
         extractedFiles.push({
           name: fileName,
           path: relativePath,
-          size: zipEntry._data?.uncompressedSize || 0,
+          size: estimatedSize,
           data,
         });
       });

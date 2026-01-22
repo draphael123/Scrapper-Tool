@@ -418,6 +418,8 @@ export default function Home() {
     processedFiles: number;
     failedFiles: number;
     stage: 'extracting' | 'analyzing' | 'complete';
+    currentOperation?: string;
+    details?: string[];
   } | null>(null);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -564,12 +566,20 @@ export default function Home() {
       for (let i = 0; i < validFiles.length; i++) {
         const file = validFiles[i];
         
-        // Update progress
+        // Update progress (with small delay to ensure UI updates)
+        await new Promise(resolve => setTimeout(resolve, 50));
+        
         setProgressData(prev => prev ? {
           ...prev,
           currentFile: file.name,
           currentIndex: i,
           stage: 'extracting',
+          currentOperation: `Extracting text from ${file.name}...`,
+          details: [
+            `File ${i + 1} of ${validFiles.length}`,
+            `Type: ${file.name.endsWith('.pdf') ? 'PDF' : 'Word Document'}`,
+            `Size: ${(file.size / 1024).toFixed(1)} KB`,
+          ],
         } : null);
 
         try {
@@ -577,22 +587,53 @@ export default function Home() {
           formData.append('file', file);
           formData.append('useAI', withAI.toString());
 
-          // Update to analyzing stage
-          setProgressData(prev => prev ? { ...prev, stage: 'analyzing' } : null);
-
           const response = await fetch('/api/analyze', {
             method: 'POST',
             body: formData,
           });
 
+          // Update to analyzing stage
+          setProgressData(prev => prev ? {
+            ...prev,
+            stage: 'analyzing',
+            currentOperation: withAI ? 'AI analyzing patterns...' : 'Detecting file name patterns...',
+            details: [
+              'Processing response from server...',
+              withAI ? 'Using GPT-4o-mini for intelligent extraction' : 'Using regex pattern matching',
+            ],
+          } : null);
+
           const data = await response.json();
+          
+          // Update with actual data
+          setProgressData(prev => prev ? {
+            ...prev,
+            details: [
+              `Text extracted: ${data.textLength || 0} characters`,
+              withAI ? 'AI analysis complete' : 'Pattern detection complete',
+            ],
+          } : null);
 
           if (response.ok && data.analysis) {
             results.push({ fileName: file.name, success: true, analysis: { ...data.analysis, aiEnhanced: data.aiUsed } });
-            setProgressData(prev => prev ? { ...prev, processedFiles: prev.processedFiles + 1 } : null);
+            setProgressData(prev => prev ? {
+              ...prev,
+              processedFiles: prev.processedFiles + 1,
+              currentOperation: `Found ${data.analysis.totalFound} file names`,
+              details: [
+                `✓ ${file.name} processed successfully`,
+                `Found ${data.analysis.totalFound} file names`,
+                `${data.analysis.patterns.length} pattern groups identified`,
+              ],
+            } : null);
           } else {
             results.push({ fileName: file.name, success: false, error: data.error || 'Unknown error' });
-            setProgressData(prev => prev ? { ...prev, failedFiles: prev.failedFiles + 1 } : null);
+            setProgressData(prev => prev ? {
+              ...prev,
+              failedFiles: prev.failedFiles + 1,
+              currentOperation: `Failed to process ${file.name}`,
+              details: [`✗ Error: ${data.error || 'Unknown error'}`],
+            } : null);
           }
         } catch (err) {
           results.push({ fileName: file.name, success: false, error: err instanceof Error ? err.message : 'Unknown error' });
@@ -725,12 +766,14 @@ export default function Home() {
     setUploadedFileName(file.name);
 
     setProgressData({
-      currentFile: 'Extracting ZIP archive...',
+      currentFile: file.name,
       currentIndex: 0,
       totalFiles: 1,
       processedFiles: 0,
       failedFiles: 0,
       stage: 'extracting',
+      currentOperation: 'Reading ZIP archive...',
+      details: [`File size: ${(file.size / 1024 / 1024).toFixed(2)} MB`],
     });
 
     try {
@@ -739,10 +782,23 @@ export default function Home() {
       formData.append('file', file);
       formData.append('includeSubfolders', includeSubfolders.toString());
 
+      // Update progress before fetch
+      setProgressData(prev => prev ? {
+        ...prev,
+        currentOperation: 'Uploading ZIP to server...',
+        details: [`File size: ${(file.size / 1024 / 1024).toFixed(2)} MB`, 'Preparing for extraction...'],
+      } : null);
+
       const extractResponse = await fetch('/api/extract-zip', {
         method: 'POST',
         body: formData,
       });
+
+      setProgressData(prev => prev ? {
+        ...prev,
+        currentOperation: 'Server processing ZIP archive...',
+        details: ['Scanning archive structure...', 'Identifying supported files...'],
+      } : null);
 
       const extractData = await extractResponse.json();
 
@@ -750,15 +806,41 @@ export default function Home() {
         throw new Error(extractData.error || 'Failed to extract ZIP file');
       }
 
-      // Convert extracted files to File objects
+      const totalFiles = extractData.files?.length || 0;
+      
+      setProgressData(prev => prev ? {
+        ...prev,
+        currentOperation: `Found ${totalFiles} files. Converting to processable format...`,
+        totalFiles: totalFiles,
+        details: [`Extracted ${totalFiles} PDF/Word documents`, 'Converting base64 data to files...'],
+      } : null);
+
+      // Convert extracted files to File objects with progress updates
       const extractedFiles: File[] = [];
       
-      for (const extractedFile of extractData.files) {
+      for (let i = 0; i < extractData.files.length; i++) {
+        const extractedFile = extractData.files[i];
+        
+        // Update progress during conversion (with small delay to ensure UI updates)
+        await new Promise(resolve => setTimeout(resolve, 10));
+        
+        setProgressData(prev => prev ? {
+          ...prev,
+          currentFile: extractedFile.name,
+          currentIndex: i,
+          currentOperation: `Converting file ${i + 1}/${totalFiles}...`,
+          details: [
+            `Processing: ${extractedFile.name}`,
+            `Progress: ${i + 1} of ${totalFiles} files converted`,
+            `Size: ${(extractedFile.size / 1024).toFixed(1)} KB`,
+          ],
+        } : null);
+        
         // Decode base64 to array buffer
         const binaryString = atob(extractedFile.data);
         const bytes = new Uint8Array(binaryString.length);
-        for (let i = 0; i < binaryString.length; i++) {
-          bytes[i] = binaryString.charCodeAt(i);
+        for (let j = 0; j < binaryString.length; j++) {
+          bytes[j] = binaryString.charCodeAt(j);
         }
         
         // Determine MIME type
@@ -774,12 +856,17 @@ export default function Home() {
 
       // Update progress
       setProgressData({
-        currentFile: extractedFiles[0]?.name || 'Processing...',
+        currentFile: extractedFiles[0]?.name || 'Starting analysis...',
         currentIndex: 0,
         totalFiles: extractedFiles.length,
         processedFiles: 0,
         failedFiles: 0,
         stage: 'analyzing',
+        currentOperation: 'Ready to analyze extracted files',
+        details: [
+          `Successfully extracted ${extractedFiles.length} files`,
+          'Starting document analysis...',
+        ],
       });
 
       // Now process the extracted files
@@ -787,10 +874,6 @@ export default function Home() {
       setUploadedFileName(`${file.name} (${extractedFiles.length} files)`);
       
       // Continue with regular file processing
-      // Reset loading state so processFiles can set it again
-      setIsLoading(false);
-      setProgressData(null);
-      
       await processFiles(extractedFiles, withAI);
 
     } catch (err) {

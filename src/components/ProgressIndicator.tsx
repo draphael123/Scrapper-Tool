@@ -9,6 +9,8 @@ interface ProgressIndicatorProps {
   processedFiles: number;
   failedFiles: number;
   stage: 'extracting' | 'analyzing' | 'complete';
+  currentOperation?: string;
+  details?: string[];
 }
 
 export default function ProgressIndicator({
@@ -18,8 +20,10 @@ export default function ProgressIndicator({
   processedFiles,
   failedFiles,
   stage,
+  currentOperation,
+  details = [],
 }: ProgressIndicatorProps) {
-  const progress = totalFiles > 0 ? (currentIndex / totalFiles) * 100 : 0;
+  const progress = totalFiles > 0 ? ((currentIndex + (stage === 'complete' ? 1 : 0)) / totalFiles) * 100 : 0;
 
   const stageLabels = {
     extracting: 'Extracting text',
@@ -86,12 +90,30 @@ export default function ProgressIndicator({
 
       {/* Current File */}
       <div className="bg-[var(--bg-secondary)] rounded-lg p-3 mb-4">
-        <div className="flex items-center gap-2 text-sm">
-          <span className="text-[var(--text-muted)]">Current:</span>
+        <div className="flex items-center gap-2 text-sm mb-2">
+          <span className="text-[var(--text-muted)] shrink-0">Current:</span>
           <span className="text-[var(--text-primary)] font-medium truncate flex-1" title={currentFile}>
             {currentFile || 'Preparing...'}
           </span>
         </div>
+        {currentOperation && (
+          <div className="flex items-center gap-2 text-xs mt-2 pt-2 border-t border-[var(--bg-primary)]/20">
+            <span className="text-[var(--text-muted)] shrink-0">Operation:</span>
+            <span className="text-[var(--accent-primary)] font-medium truncate flex-1">
+              {currentOperation}
+            </span>
+          </div>
+        )}
+        {details.length > 0 && (
+          <div className="mt-2 pt-2 border-t border-[var(--bg-primary)]/20 space-y-1">
+            {details.map((detail, idx) => (
+              <div key={idx} className="text-xs text-[var(--text-muted)] flex items-center gap-2">
+                <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent-primary)] shrink-0" />
+                <span className="truncate">{detail}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Stats */}
@@ -110,12 +132,29 @@ export default function ProgressIndicator({
         </div>
       </div>
 
-      {/* Animated dots */}
-      <div className="flex items-center justify-center gap-1 mt-4">
-        <span className="w-2 h-2 rounded-full bg-[#00d9ff] animate-bounce" style={{ animationDelay: '0ms' }} />
-        <span className="w-2 h-2 rounded-full bg-[#a855f7] animate-bounce" style={{ animationDelay: '150ms' }} />
-        <span className="w-2 h-2 rounded-full bg-[#ec4899] animate-bounce" style={{ animationDelay: '300ms' }} />
-      </div>
+      {/* Activity indicator - pulse animation when processing */}
+      {stage !== 'complete' && (
+        <div className="mt-4 flex items-center justify-center gap-2">
+          <div className="flex items-center gap-1">
+            <span className="w-2 h-2 rounded-full bg-[#00d9ff] animate-bounce" style={{ animationDelay: '0ms' }} />
+            <span className="w-2 h-2 rounded-full bg-[#a855f7] animate-bounce" style={{ animationDelay: '150ms' }} />
+            <span className="w-2 h-2 rounded-full bg-[#ec4899] animate-bounce" style={{ animationDelay: '300ms' }} />
+          </div>
+          <span className="text-xs text-[var(--text-muted)] animate-pulse">
+            Processing...
+          </span>
+        </div>
+      )}
+      
+      {/* Completion indicator */}
+      {stage === 'complete' && (
+        <div className="mt-4 flex items-center justify-center gap-2 text-[#10b981]">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <polyline points="20 6 9 17 4 12" />
+          </svg>
+          <span className="text-sm font-medium">Processing Complete!</span>
+        </div>
+      )}
     </div>
   );
 }
